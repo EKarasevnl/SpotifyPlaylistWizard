@@ -1,0 +1,4 @@
+# Development dependencies
+ruff
+
+# Add your project dependencies below
