@@ -69,9 +69,7 @@ class OAuthFlaskApp:
 
         custom_links = [(text, route) for route, text in self.custom_routes.items()]
 
-        return render_template_string(
-            template, app_name="OAuth Application", provider_name=self.config.provider_name, custom_links=custom_links
-        )
+        return render_template_string(template, app_name="OAuth Application", provider_name=self.config.provider_name, custom_links=custom_links)
 
     def login(self):
         """Initiate OAuth login flow"""
@@ -163,12 +161,7 @@ class OAuthFlaskApp:
         """
 
         # Try common display name fields
-        display_name = (
-            user_data.get("display_name")
-            or user_data.get("name")
-            or user_data.get("username")
-            or user_data.get("email", "Unknown User")
-        )
+        display_name = user_data.get("display_name") or user_data.get("name") or user_data.get("username") or user_data.get("email", "Unknown User")
 
         custom_links = [(text, route) for route, text in self.custom_routes.items()]
 
@@ -241,35 +234,253 @@ def create_spotify_app() -> OAuthFlaskApp:
 
     app = OAuthFlaskApp(spotify_config, "Spotify OAuth App")
 
-    # Add Spotify-specific functionality
     @app.require_auth
     def create_playlist():
+        """Create a playlist with form input"""
+        if request.method == "GET":
+            # Show the form
+            user_data = session.get("user_data", {})
+            user_id = user_data.get("id")
+
+            return f"""
+            <h2>Create a New Playlist</h2>
+            <p><strong>Creating playlist for user:</strong> {user_data.get('display_name', 'Unknown')} (ID: {user_id})</p>
+            <form method="POST">
+                <p>
+                    <label for="name">Playlist Name:</label><br>
+                    <input type="text" id="name" name="name" required>
+                </p>
+                <p>
+                    <label for="description">Description (optional):</label><br>
+                    <textarea id="description" name="description" rows="3" cols="50"></textarea>
+                </p>
+                <p>
+                    <label for="public">Playlist Visibility:</label><br>
+                    <input type="radio" id="private" name="public" value="false" checked>
+                    <label for="private">Private</label><br>
+                    <input type="radio" id="public" name="public" value="true">
+                    <label for="public">Public</label>
+                </p>
+                <p>
+                    <input type="submit" value="Create Playlist">
+                </p>
+            </form>
+            <a href="/">Back to Home</a>
+            """
+
+        # Handle POST request (form submission)
+        name_playlist = request.form.get("name")
+        description = request.form.get("description", "")
+        is_public = request.form.get("public", "false") == "true"
+
+        if not name_playlist:
+            return "Playlist name is required!"
+
         user_data = session.get("user_data", {})
         user_id = user_data.get("id")
 
         if not user_id:
             return "User ID not found. Please log in again."
 
-        playlist_data = {"name": "Test Playlist", "description": "New playlist description", "public": False}
+        # Create playlist data
+        playlist_data = {"name": name_playlist, "description": description, "public": is_public}
 
         try:
-            response = app.make_api_request(
-                f"https://api.spotify.com/v1/users/{user_id}/playlists",
-                method="POST",
-                json=playlist_data,
-                headers={"Content-Type": "application/json"},
-            )
+            response = app.make_api_request(f"https://api.spotify.com/v1/users/{user_id}/playlists", method="POST", json=playlist_data)
 
             if response.status_code == 201:
-                return "Playlist created successfully!"
+                playlist_info = response.json()
+
+                # Verify ownership
+                created_owner_id = playlist_info.get("owner", {}).get("id")
+                ownership_status = "✅ OWNED BY YOU" if created_owner_id == user_id else f"❌ OWNED BY: {created_owner_id}"
+
+                return f"""
+                <h2>Success!</h2>
+                <p>Playlist "{name_playlist}" created successfully!</p>
+                <p><strong>Ownership Status:</strong> {ownership_status}</p>
+                <p><strong>Playlist ID:</strong> {playlist_info.get('id')}</p>
+                <p><strong>Visibility:</strong> {'Public' if playlist_info.get('public') else 'Private'}</p>
+                <p><a href="{playlist_info.get('external_urls', {}).get('spotify', '#')}" target="_blank">Open in Spotify</a></p>
+                
+                <h3>Debug Info:</h3>
+                <details>
+                    <summary>Click to see full API response</summary>
+                    <pre style="background-color: #f0f0f0; padding: 10px; overflow-x: auto;">
+    {response.text}
+                    </pre>
+                </details>
+                
+                <br>
+                <a href="/create_playlist">Create Another</a> | 
+                <a href="/debug_playlists">Check All Playlists</a> | 
+                <a href="/add_song_to_playlist">Add Songs to This Playlist</a> | 
+                <a href="/">Home</a>
+                """
             else:
-                return f"Failed to create playlist: {response.json()}"
+                return f"""
+                <h2>Failed to create playlist</h2>
+                <p><strong>Status Code:</strong> {response.status_code}</p>
+                <p><strong>Error:</strong> {response.text}</p>
+                <p><strong>Your User ID:</strong> {user_id}</p>
+                <a href="/create_playlist">Try Again</a> | <a href="/">Home</a>
+                """
 
         except Exception as e:
-            return f"Error creating playlist: {str(e)}"
+            return f"""
+            <h2>Error creating playlist</h2>
+            <p><strong>Error:</strong> {str(e)}</p>
+            <p><strong>Your User ID:</strong> {user_id}</p>
+            <a href="/create_playlist">Try Again</a> | <a href="/">Home</a>
+            """
 
-    # Register the custom route
-    app.add_custom_route("/create_playlist", create_playlist, "Create Playlist")
+    @app.require_auth
+    def add_song_to_playlist():
+        """Search for a song and add it to a selected playlist"""
+
+        user_data = session.get("user_data", {})
+        user_id = user_data.get("id")
+        # Get user's playlists first
+        try:
+            playlists_response = app.make_api_request(f"https://api.spotify.com/v1/users/{user_id}/playlists")
+            if playlists_response.status_code != 200:
+                return "Failed to load playlists"
+
+            user_playlists = playlists_response.json().get("items", [])
+            # Filter to only show playlists the user owns (can modify)
+
+            owned_playlists = [p for p in user_playlists]
+
+        except Exception as e:
+            return f"Error loading playlists: {str(e)}"
+
+        # Get form parameters
+        song_query = request.form.get("song_query") or request.args.get("q", "")
+        selected_playlist = request.form.get("playlist_id")
+        selected_track = request.form.get("track_uri")
+
+        # Step 1: Show search form if no query
+        if not song_query:
+            playlist_options = ""
+            for playlist in owned_playlists:
+                playlist_options += f'<option value="{playlist["id"]}">{playlist["name"]}</option>'
+
+            return f"""
+            <h2>Add Song to Playlist</h2>
+            <form method="POST">
+                <p>
+                    <label for="song_query">Search for a song:</label><br>
+                    <input type="text" id="song_query" name="song_query" placeholder="Enter song name or artist" required>
+                </p>
+                <p>
+                    <label for="playlist_id">Select playlist:</label><br>
+                    <select id="playlist_id" name="playlist_id" required>
+                        <option value="">Choose a playlist...</option>
+                        {playlist_options}
+                    </select>
+                </p>
+                <p>
+                    <input type="submit" value="Search Songs">
+                </p>
+            </form>
+            <a href="/">Back to Home</a>
+            """
+
+        # Step 2: If we have a track selected, add it to the playlist
+        if selected_track and selected_playlist:
+            try:
+                add_response = app.make_api_request(
+                    f"https://api.spotify.com/v1/playlists/{selected_playlist}/tracks",
+                    method="POST",
+                    json={"uris": [selected_track]},
+                    headers={"Content-Type": "application/json"},
+                )
+
+                if add_response.status_code == 201:
+                    # Get playlist name for confirmation
+                    playlist_name = next((p["name"] for p in owned_playlists if p["id"] == selected_playlist), "Unknown")
+                    return f"""
+                    <h2>Success!</h2>
+                    <p>Song added to playlist "{playlist_name}" successfully!</p>
+                    <a href="/add_song_to_playlist">Add Another Song</a> | <a href="/">Home</a>
+                    """
+                else:
+                    return f"Failed to add song to playlist: {add_response.json()}"
+
+            except Exception as e:
+                return f"Error adding song to playlist: {str(e)}"
+
+        # Step 3: Show search results with add buttons
+        if song_query and selected_playlist:
+            try:
+                search_params = {"q": song_query, "type": "track", "limit": 15}
+
+                response = app.make_api_request("https://api.spotify.com/v1/search", method="GET", params=search_params)
+
+                if response.status_code == 200:
+                    search_results = response.json()
+                    tracks = search_results.get("tracks", {}).get("items", [])
+
+                    if not tracks:
+                        return f"""
+                        <h2>No Results Found</h2>
+                        <p>No songs found for "{song_query}"</p>
+                        <a href="/add_song_to_playlist">Search Again</a> | <a href="/">Home</a>
+                        """
+
+                    # Get selected playlist name
+                    playlist_name = next((p["name"] for p in owned_playlists if p["id"] == selected_playlist), "Unknown")
+
+                    # Format results with add buttons
+                    results_html = f"""
+                    <h2>Search Results for '{song_query}'</h2>
+                    <h3>Adding to playlist: {playlist_name}</h3>
+                    <div style="margin-bottom: 20px;">
+                    """
+
+                    for track in tracks:
+                        artist_names = ", ".join([artist["name"] for artist in track["artists"]])
+                        album_name = track["album"]["name"]
+                        track_name = track["name"]
+                        track_uri = track["uri"]
+                        spotify_url = track["external_urls"]["spotify"]
+
+                        results_html += f"""
+                        <div style="border: 1px solid #ccc; margin: 10px 0; padding: 10px;">
+                            <strong>{track_name}</strong> by {artist_names}<br>
+                            Album: {album_name}<br>
+                            <a href="{spotify_url}" target="_blank">Preview in Spotify</a><br><br>
+                            <form method="POST" style="display: inline;">
+                                <input type="hidden" name="song_query" value="{song_query}">
+                                <input type="hidden" name="playlist_id" value="{selected_playlist}">
+                                <input type="hidden" name="track_uri" value="{track_uri}">
+                                <button type="submit" style="background-color: #1DB954; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">
+                                    Add to Playlist
+                                </button>
+                            </form>
+                        </div>
+                        """
+
+                    results_html += """
+                    </div>
+                    <a href="/add_song_to_playlist">New Search</a> | <a href="/">Home</a>
+                    """
+
+                    return results_html
+                else:
+                    return f"Failed to search songs: {response.json()}"
+
+            except Exception as e:
+                return f"Error searching for songs: {str(e)}"
+
+    # Register the custom routes with support for both GET and POST methods
+    app.app.add_url_rule("/create_playlist", "create_playlist", create_playlist, methods=["GET", "POST"])
+    app.custom_routes["/create_playlist"] = "Create Playlist"
+
+    app.app.add_url_rule("/add_song_to_playlist", "add_song_to_playlist", add_song_to_playlist, methods=["GET", "POST"])
+    app.custom_routes["/add_song_to_playlist"] = "Add Song to Playlist"
+
+    # app.add_custom_route("/find_song", find_song, "Find Song")
 
     return app
 
