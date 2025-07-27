@@ -1,4 +1,5 @@
 # Development dependencies
 ruff
+pre-commit
 
 # Add your project dependencies below
