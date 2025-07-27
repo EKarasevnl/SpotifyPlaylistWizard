@@ -6,6 +6,7 @@ from base64 import b64encode
 import requests
 from dotenv import load_dotenv
 from flask import Flask, redirect, request, session
+
 from flask_session import Session
 
 load_dotenv()
@@ -45,6 +46,7 @@ def login():
 def callback():
     error = request.args.get("error")
     code = request.args.get("code")
+    # state = request.args.get("state")
 
     if error:
         return f"Authorization failed: {error}"
