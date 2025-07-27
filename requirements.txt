@@ -3,3 +3,6 @@ ruff
 pre-commit
 
 # Add your project dependencies below
+requests
+python-dotenv
+Flask
