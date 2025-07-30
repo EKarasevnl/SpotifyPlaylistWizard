@@ -492,7 +492,7 @@ def create_spotify_app() -> OAuthFlaskApp:
                     <input type="text" id="playlist_name" name="playlist_name" required>
                 </p>
                 <p>
-                    <label for="num_songs">Number of Songs (5-50):</label><br>
+                    <label for="num_songs">The maximum number of songs (5-50):</label><br>
                     <input type="number" id="num_songs" name="num_songs" min="5" max="50" value="15">
                 </p>
                 <p>

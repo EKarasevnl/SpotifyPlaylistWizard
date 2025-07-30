@@ -15,7 +15,7 @@ def get_song_recommendations_from_llm(model: str, prompt: str, num_songs: int) -
         },
         {
             "role": "user",
-            "content": f"""Suggest {num_songs} songs that match: {prompt}.
+            "content": f"""Suggest at most {num_songs} songs that match: {prompt}.
             Return ONLY the list in the specified format.""",
         },
     ]
