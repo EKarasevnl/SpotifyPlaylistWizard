@@ -7,3 +7,4 @@ requests
 python-dotenv
 Flask
 flask_session
+ollama

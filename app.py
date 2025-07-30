@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from flask import Flask, redirect, render_template_string, request, session
 
 from flask_session import Session
+from llm_search import get_song_recommendations_from_llm
 
 
 @dataclass
@@ -473,6 +474,128 @@ def create_spotify_app() -> OAuthFlaskApp:
             except Exception as e:
                 return f"Error searching for songs: {str(e)}"
 
+    @app.require_auth
+    def compile_songs_to_playlist():
+        """Compile songs using LLM and add to a playlist."""
+        if request.method == "GET":
+            # Show the form for playlist generation
+            return """
+            <h2>Generate Playlist with AI</h2>
+            <form method="POST">
+                <p>
+                    <label for="prompt">Describe your playlist:</label><br>
+                    <textarea id="prompt" name="prompt" rows="3" cols="50" required 
+                        placeholder="e.g., 'Upbeat workout songs from the 2000s' or 'Chill jazz for studying'"></textarea>
+                </p>
+                <p>
+                    <label for="playlist_name">Playlist Name:</label><br>
+                    <input type="text" id="playlist_name" name="playlist_name" required>
+                </p>
+                <p>
+                    <label for="num_songs">Number of Songs (5-50):</label><br>
+                    <input type="number" id="num_songs" name="num_songs" min="5" max="50" value="15">
+                </p>
+                <p>
+                    <input type="submit" value="Generate Playlist">
+                </p>
+            </form>
+            <a href="/">Back to Home</a>
+            """
+
+        # Handle POST request
+        prompt = request.form.get("prompt")
+        playlist_name = request.form.get("playlist_name")
+        num_songs = int(request.form.get("num_songs", 15))
+        user_data = session.get("user_data", {})
+        user_id = user_data.get("id")
+
+        if not all([prompt, playlist_name, user_id]):
+            return "Missing required parameters", 400
+
+        try:
+            # Step 1: Get song recommendations from LLM
+            songs = get_song_recommendations_from_llm(model="gemma3:4b", prompt=prompt, num_songs=num_songs)
+
+            if not songs:
+                return "Failed to get song recommendations from AI", 500
+
+            # Step 2: Search for each song on Spotify
+            track_uris = []
+            not_found = []
+
+            for song in songs:
+                track_uri = search_spotify_track(app, song)
+                if track_uri:
+                    track_uris.append(track_uri)
+                else:
+                    not_found.append(song)
+
+            if not track_uris:
+                return "None of the recommended songs were found on Spotify", 404
+
+            # Step 3: Create the playlist
+            playlist_data = {"name": playlist_name, "description": f"AI-generated playlist based on: '{prompt}'", "public": True}
+
+            playlist_response = app.make_api_request(f"https://api.spotify.com/v1/users/{user_id}/playlists", method="POST", json=playlist_data)
+
+            if playlist_response.status_code != 201:
+                return f"Failed to create playlist: {playlist_response.text}", 500
+
+            playlist_id = playlist_response.json().get("id")
+
+            # Step 4: Add tracks to playlist
+            add_response = app.make_api_request(f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks", method="POST", json={"uris": track_uris})
+
+            if add_response.status_code != 201:
+                return f"Playlist created but failed to add songs: {add_response.text}", 500
+
+            # Success response
+            playlist_info = playlist_response.json()
+            success_html = f"""
+            <h2>Playlist Created Successfully!</h2>
+            <p><strong>Name:</strong> {playlist_name}</p>
+            <p><strong>Based on:</strong> "{prompt}"</p>
+            <p><strong>Songs added:</strong> {len(track_uris)}/{len(songs)}</p>
+            """
+
+            if not_found:
+                success_html += f"""
+                <details>
+                    <summary>Songs not found on Spotify ({len(not_found)})</summary>
+                    <ul>
+                        {"".join(f"<li>{song}</li>" for song in not_found)}
+                    </ul>
+                </details>
+                """
+
+            success_html += f"""
+            <p><a href="{playlist_info.get('external_urls', {}).get('spotify', '#')}" target="_blank">
+                Open Playlist in Spotify
+            </a></p>
+            <a href="/compile_songs_to_playlist">Create Another</a> | <a href="/">Home</a>
+            """
+
+            return success_html
+
+        except Exception as e:
+            return f"Error generating playlist: {str(e)}", 500
+
+    def search_spotify_track(app: OAuthFlaskApp, song_query: str) -> Optional[str]:
+        """Search for a track on Spotify and return its URI"""
+        try:
+            search_params = {"q": song_query, "type": "track", "limit": 1}
+
+            response = app.make_api_request("https://api.spotify.com/v1/search", method="GET", params=search_params)
+
+            if response.status_code == 200:
+                tracks = response.json().get("tracks", {}).get("items", [])
+                if tracks:
+                    return tracks[0].get("uri")
+            return None
+
+        except Exception:
+            return None
+
     # Register the custom routes with support for both GET and POST methods
     app.app.add_url_rule("/create_playlist", "create_playlist", create_playlist, methods=["GET", "POST"])
     app.custom_routes["/create_playlist"] = "Create Playlist"
@@ -480,7 +603,9 @@ def create_spotify_app() -> OAuthFlaskApp:
     app.app.add_url_rule("/add_song_to_playlist", "add_song_to_playlist", add_song_to_playlist, methods=["GET", "POST"])
     app.custom_routes["/add_song_to_playlist"] = "Add Song to Playlist"
 
-    # app.add_custom_route("/find_song", find_song, "Find Song")
+    # Register the new route
+    app.app.add_url_rule("/compile_playlist", "compile_songs_to_playlist", compile_songs_to_playlist, methods=["GET", "POST"])
+    app.custom_routes["/compile_playlist"] = "Generate AI Playlist"
 
     return app
 
